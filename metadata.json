@@ -1,0 +1,5 @@
+{
+  "name": "MaterialLife - 材料寿命智能预测系统",
+  "description": "基于机器学习的材料多维度性能分析与寿命预测平台，支持时间、强度、应变、应变速率等多维数据处理与可视化。",
+  "requestFramePermissions": []
+}

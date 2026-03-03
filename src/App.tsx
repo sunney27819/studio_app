@@ -1,0 +1,710 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  LineChart, 
+  Line, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer,
+  AreaChart,
+  Area
+} from 'recharts';
+import { 
+  Activity, 
+  Database, 
+  Cpu, 
+  TrendingUp, 
+  AlertCircle, 
+  FileJson,
+  RefreshCw,
+  ChevronRight,
+  ShieldCheck,
+  User,
+  Lock,
+  LogOut,
+  Plus,
+  Trash2,
+  Settings,
+  Users,
+  Upload
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+// Utility for tailwind classes
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+// --- Types ---
+interface DataPoint {
+  id?: number;
+  time: number;
+  strength: number;
+  strain: number;
+  strain_rate: number;
+}
+
+interface PredictionResult {
+  time: number;
+  predictedLife: number;
+  confidenceUpper: number;
+  confidenceLower: number;
+}
+
+enum ModelType {
+  LINEAR_REGRESSION = '线性回归 (LR)',
+  RANDOM_FOREST = '随机森林 (RF)',
+  LSTM = '长短期记忆网络 (LSTM)',
+  XGBOOST = '梯度提升树 (XGBoost)'
+}
+
+interface UserInfo {
+  id: number;
+  username: string;
+  role: 'admin' | 'user';
+}
+
+// --- Prediction Logic Simulation ---
+const predictLife = (data: DataPoint[], model: ModelType): PredictionResult[] => {
+  return data.map((d) => {
+    let baseLife = 100 - (d.time * 0.8);
+    let noise = 0;
+    let confidenceRange = 5;
+
+    switch (model) {
+      case ModelType.LINEAR_REGRESSION:
+        baseLife = 100 - (d.time * 0.85);
+        noise = Math.random() * 2;
+        confidenceRange = 8;
+        break;
+      case ModelType.RANDOM_FOREST:
+        baseLife = 100 - (d.time * 0.8) + Math.sin(d.time / 5) * 3;
+        noise = Math.random() * 4;
+        confidenceRange = 6;
+        break;
+      case ModelType.LSTM:
+        baseLife = 100 * Math.exp(-0.02 * d.time);
+        noise = Math.random() * 1;
+        confidenceRange = 3;
+        break;
+      case ModelType.XGBOOST:
+        baseLife = 100 - (d.time * 0.75) - (d.strain * 2);
+        noise = Math.random() * 3;
+        confidenceRange = 5;
+        break;
+    }
+
+    const prediction = Math.max(0, baseLife + noise);
+    return {
+      time: d.time,
+      predictedLife: parseFloat(prediction.toFixed(2)),
+      confidenceUpper: parseFloat((prediction + confidenceRange).toFixed(2)),
+      confidenceLower: parseFloat(Math.max(0, prediction - confidenceRange).toFixed(2)),
+    };
+  });
+};
+
+export default function App() {
+  const [user, setUser] = useState<UserInfo | null>(null);
+  const [loginData, setLoginData] = useState({ username: '', password: '' });
+  const [loginError, setLoginError] = useState('');
+  
+  const [rawData, setRawData] = useState<DataPoint[]>([]);
+  const [selectedModel, setSelectedModel] = useState<ModelType>(ModelType.LINEAR_REGRESSION);
+  const [predictions, setPredictions] = useState<PredictionResult[]>([]);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [isTraining, setIsTraining] = useState(false);
+  const [trainedModels, setTrainedModels] = useState<Set<ModelType>>(new Set());
+  const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Admin state
+  const [adminUsers, setAdminUsers] = useState<any[]>([]);
+  const [newUser, setNewUser] = useState({ username: '', password: '', role: 'user' });
+  const [view, setView] = useState<'main' | 'admin'>('main');
+
+  // New data point state
+  const [newDataPoint, setNewDataPoint] = useState({ time: 0, strength: 0, strain: 0, strain_rate: 0 });
+
+  useEffect(() => {
+    if (user) {
+      fetchData();
+      if (user.role === 'admin') fetchAdminUsers();
+    }
+  }, [user]);
+
+  const fetchData = async () => {
+    const res = await fetch('/api/data');
+    const data = await res.json();
+    setRawData(data);
+  };
+
+  const fetchAdminUsers = async () => {
+    const res = await fetch('/api/admin/users');
+    const data = await res.json();
+    setAdminUsers(data);
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError('');
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(loginData),
+    });
+    const data = await res.json();
+    if (data.success) {
+      setUser(data.user);
+    } else {
+      setLoginError(data.message);
+    }
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    setView('main');
+  };
+
+  const handleAddData = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const res = await fetch('/api/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newDataPoint),
+    });
+    if (res.ok) {
+      fetchData();
+      setNotification({ message: '数据添加成功', type: 'success' });
+      setTimeout(() => setNotification(null), 3000);
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const text = event.target?.result as string;
+        // Simple CSV parser
+        const lines = text.split('\n').filter(l => l.trim());
+        const data = lines.slice(1).map(line => {
+          const [time, strength, strain, strain_rate] = line.split(',').map(Number);
+          return { time, strength, strain, strain_rate };
+        });
+
+        const res = await fetch('/api/data', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        if (res.ok) {
+          fetchData();
+          setNotification({ message: `成功导入 ${data.length} 条数据`, type: 'success' });
+          setTimeout(() => setNotification(null), 3000);
+        }
+      } catch (err) {
+        setNotification({ message: '文件解析失败，请确保格式正确(CSV: time,strength,strain,strain_rate)', type: 'error' });
+        setTimeout(() => setNotification(null), 3000);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleTrain = () => {
+    if (rawData.length === 0) return;
+    setIsTraining(true);
+    setTimeout(() => {
+      setTrainedModels(prev => new Set(prev).add(selectedModel));
+      setIsTraining(false);
+      setNotification({ message: `${selectedModel} 模型训练完成！现在可以进行预测。`, type: 'success' });
+      setTimeout(() => setNotification(null), 5000);
+    }, 2000);
+  };
+
+  const handlePredict = () => {
+    if (rawData.length === 0 || !trainedModels.has(selectedModel)) return;
+    setIsProcessing(true);
+    setTimeout(() => {
+      const results = predictLife(rawData, selectedModel);
+      setPredictions(results);
+      setIsProcessing(false);
+    }, 800);
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const res = await fetch('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newUser),
+    });
+    const data = await res.json();
+    if (data.success) {
+      fetchAdminUsers();
+      setNewUser({ username: '', password: '', role: 'user' });
+      setNotification({ message: '用户创建成功', type: 'success' });
+    } else {
+      setNotification({ message: data.message, type: 'error' });
+    }
+    setTimeout(() => setNotification(null), 3000);
+  };
+
+  const handleDeleteUser = async (id: number) => {
+    await fetch(`/api/admin/users/${id}`, { method: 'DELETE' });
+    fetchAdminUsers();
+  };
+
+  const handleClearData = async () => {
+    if (confirm('确定要清空所有实验数据吗？')) {
+      await fetch('/api/data/clear', { method: 'DELETE' });
+      fetchData();
+      setPredictions([]);
+    }
+  };
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-100"
+        >
+          <div className="p-8 bg-indigo-600 text-white text-center">
+            <div className="w-16 h-16 bg-white/20 rounded-2xl flex items-center justify-center mx-auto mb-4 backdrop-blur-md">
+              <Activity size={32} />
+            </div>
+            <h1 className="text-2xl font-black tracking-tight">MaterialLife</h1>
+            <p className="text-indigo-100 text-sm font-medium opacity-80 mt-1">材料寿命智能预测系统登录</p>
+          </div>
+          
+          <form onSubmit={handleLogin} className="p-8 space-y-6">
+            <div className="space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">用户名</label>
+                <div className="relative">
+                  <User className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input 
+                    type="text"
+                    required
+                    value={loginData.username}
+                    onChange={e => setLoginData({ ...loginData, username: e.target.value })}
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+                    placeholder="请输入用户名"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">密码</label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input 
+                    type="password"
+                    required
+                    value={loginData.password}
+                    onChange={e => setLoginData({ ...loginData, password: e.target.value })}
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+                    placeholder="请输入密码"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {loginError && (
+              <motion.div 
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="p-3 bg-rose-50 text-rose-600 text-xs font-bold rounded-lg flex items-center gap-2"
+              >
+                <AlertCircle size={14} />
+                {loginError}
+              </motion.div>
+            )}
+
+            <button 
+              type="submit"
+              className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-[0.98] transition-all"
+            >
+              立即登录
+            </button>
+
+            <div className="text-center">
+              <p className="text-slate-400 text-[10px] uppercase font-bold tracking-widest">
+                默认管理员: admin / admin
+              </p>
+            </div>
+          </form>
+        </motion.div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-indigo-100">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-indigo-200">
+              <Activity size={24} />
+            </div>
+            <div>
+              <h1 className="text-lg font-bold tracking-tight">MaterialLife</h1>
+              <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">材料寿命智能预测系统 v2.0</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            {user.role === 'admin' && (
+              <button 
+                onClick={() => setView(view === 'main' ? 'admin' : 'main')}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all",
+                  view === 'admin' ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                )}
+              >
+                <Settings size={16} />
+                {view === 'admin' ? '返回主页' : '系统管理'}
+              </button>
+            )}
+            <div className="h-6 w-px bg-slate-200" />
+            <div className="flex items-center gap-3">
+              <div className="text-right hidden sm:block">
+                <p className="text-xs font-bold text-slate-900">{user.username}</p>
+                <p className="text-[10px] text-slate-500 uppercase font-bold">{user.role === 'admin' ? '系统管理员' : '研究员'}</p>
+              </div>
+              <button 
+                onClick={handleLogout}
+                className="w-10 h-10 flex items-center justify-center bg-slate-100 text-slate-600 rounded-xl hover:bg-rose-50 hover:text-rose-600 transition-all"
+              >
+                <LogOut size={20} />
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Notifications */}
+      <AnimatePresence>
+        {notification && (
+          <motion.div 
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className={cn(
+              "fixed top-20 left-1/2 -translate-x-1/2 z-[100] px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 font-bold text-sm",
+              notification.type === 'success' ? "bg-emerald-600 text-white" : "bg-rose-600 text-white"
+            )}
+          >
+            {notification.type === 'success' ? <ShieldCheck size={20} /> : <AlertCircle size={20} />}
+            {notification.message}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <main className="max-w-7xl mx-auto px-4 py-8">
+        {view === 'admin' ? (
+          <div className="space-y-8">
+            <section className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              <div className="lg:col-span-1 bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
+                <h2 className="text-xl font-black flex items-center gap-3">
+                  <Plus size={24} className="text-indigo-600" />
+                  新增用户账号
+                </h2>
+                <form onSubmit={handleCreateUser} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">用户名</label>
+                    <input 
+                      type="text"
+                      required
+                      value={newUser.username}
+                      onChange={e => setNewUser({ ...newUser, username: e.target.value })}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">密码</label>
+                    <input 
+                      type="password"
+                      required
+                      value={newUser.password}
+                      onChange={e => setNewUser({ ...newUser, password: e.target.value })}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">角色权限</label>
+                    <select 
+                      value={newUser.role}
+                      onChange={e => setNewUser({ ...newUser, role: e.target.value })}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      <option value="user">普通研究员</option>
+                      <option value="admin">系统管理员</option>
+                    </select>
+                  </div>
+                  <button type="submit" className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold shadow-lg shadow-indigo-100 mt-4">
+                    确认创建
+                  </button>
+                </form>
+              </div>
+
+              <div className="lg:col-span-2 bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
+                <h2 className="text-xl font-black flex items-center gap-3">
+                  <Users size={24} className="text-indigo-600" />
+                  用户权限列表
+                </h2>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-100">
+                        <th className="pb-4 px-2">用户名</th>
+                        <th className="pb-4 px-2">密码 (明文)</th>
+                        <th className="pb-4 px-2">角色</th>
+                        <th className="pb-4 px-2 text-right">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {adminUsers.map(u => (
+                        <tr key={u.id} className="text-sm">
+                          <td className="py-4 px-2 font-bold">{u.username}</td>
+                          <td className="py-4 px-2 font-mono text-slate-500">{u.password}</td>
+                          <td className="py-4 px-2">
+                            <span className={cn(
+                              "px-2 py-1 rounded-md text-[10px] font-bold uppercase",
+                              u.role === 'admin' ? "bg-amber-100 text-amber-700" : "bg-indigo-100 text-indigo-700"
+                            )}>
+                              {u.role === 'admin' ? '管理员' : '研究员'}
+                            </span>
+                          </td>
+                          <td className="py-4 px-2 text-right">
+                            {u.role !== 'admin' && (
+                              <button 
+                                onClick={() => handleDeleteUser(u.id)}
+                                className="p-2 text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                              >
+                                <Trash2 size={18} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </div>
+        ) : (
+          <div className="space-y-8">
+            {/* Data Management Section */}
+            <section className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              <div className="lg:col-span-1 bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
+                <h2 className="text-lg font-black flex items-center gap-3">
+                  <Database size={22} className="text-indigo-600" />
+                  实验数据录入
+                </h2>
+                
+                <div className="space-y-4">
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">本地文件读取 (CSV)</p>
+                    <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-slate-200 rounded-xl cursor-pointer hover:bg-white hover:border-indigo-400 transition-all">
+                      <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                        <Upload className="w-8 h-8 mb-2 text-slate-400" />
+                        <p className="text-xs text-slate-500 font-bold">点击或拖拽上传</p>
+                      </div>
+                      <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
+                    </label>
+                  </div>
+
+                  <form onSubmit={handleAddData} className="space-y-3">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">单条数据增加</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <input 
+                        type="number" step="any" placeholder="时间"
+                        className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"
+                        onChange={e => setNewDataPoint({ ...newDataPoint, time: Number(e.target.value) })}
+                      />
+                      <input 
+                        type="number" step="any" placeholder="强度"
+                        className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"
+                        onChange={e => setNewDataPoint({ ...newDataPoint, strength: Number(e.target.value) })}
+                      />
+                      <input 
+                        type="number" step="any" placeholder="应变"
+                        className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"
+                        onChange={e => setNewDataPoint({ ...newDataPoint, strain: Number(e.target.value) })}
+                      />
+                      <input 
+                        type="number" step="any" placeholder="速率"
+                        className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"
+                        onChange={e => setNewDataPoint({ ...newDataPoint, strain_rate: Number(e.target.value) })}
+                      />
+                    </div>
+                    <button type="submit" className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold text-xs shadow-lg shadow-indigo-100">
+                      添加至本地数据库
+                    </button>
+                  </form>
+
+                  <button 
+                    onClick={handleClearData}
+                    className="w-full py-3 bg-white border border-rose-200 text-rose-600 rounded-xl font-bold text-xs hover:bg-rose-50 transition-colors"
+                  >
+                    清空所有数据
+                  </button>
+                </div>
+              </div>
+
+              <div className="lg:col-span-2 bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-black flex items-center gap-3">
+                    <Cpu size={22} className="text-indigo-600" />
+                    模型训练与预测
+                  </h2>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {Object.values(ModelType).map((model) => (
+                    <button
+                      key={model}
+                      onClick={() => setSelectedModel(model)}
+                      className={cn(
+                        "p-4 rounded-2xl border-2 text-left transition-all relative overflow-hidden",
+                        selectedModel === model 
+                          ? "border-indigo-600 bg-indigo-50/50" 
+                          : "border-slate-100 hover:border-slate-200 bg-slate-50/30"
+                      )}
+                    >
+                      <span className={cn(
+                        "font-bold text-sm block mb-1",
+                        selectedModel === model ? "text-indigo-700" : "text-slate-700"
+                      )}>
+                        {model}
+                      </span>
+                      <p className="text-[10px] text-slate-500 leading-relaxed uppercase font-bold tracking-wider">
+                        {model === ModelType.LSTM ? "深度学习时间序列模型" : "集成学习分类与回归"}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-end gap-4 pt-6 border-t border-slate-100">
+                  <div className="text-right mr-auto">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">当前样本量</p>
+                    <p className="text-xl font-black text-slate-900">{rawData.length}</p>
+                  </div>
+                  
+                  <button
+                    disabled={rawData.length === 0 || isTraining || isProcessing}
+                    onClick={handleTrain}
+                    className={cn(
+                      "px-6 py-4 rounded-2xl font-bold text-sm flex items-center gap-3 transition-all shadow-lg",
+                      rawData.length === 0 || isTraining || isProcessing
+                        ? "bg-slate-100 text-slate-400 cursor-not-allowed"
+                        : "bg-white border-2 border-indigo-600 text-indigo-600 hover:bg-indigo-50 active:scale-95"
+                    )}
+                  >
+                    {isTraining ? <RefreshCw size={20} className="animate-spin" /> : <Cpu size={20} />}
+                    训练模型
+                  </button>
+
+                  <button
+                    disabled={rawData.length === 0 || isProcessing || isTraining || !trainedModels.has(selectedModel)}
+                    onClick={handlePredict}
+                    className={cn(
+                      "px-10 py-4 rounded-2xl font-bold text-sm flex items-center gap-3 transition-all shadow-xl",
+                      rawData.length === 0 || isProcessing || isTraining || !trainedModels.has(selectedModel)
+                        ? "bg-slate-200 text-slate-400 cursor-not-allowed shadow-none"
+                        : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 active:scale-95"
+                    )}
+                  >
+                    {isProcessing ? <RefreshCw size={20} className="animate-spin" /> : <TrendingUp size={20} />}
+                    开始预测
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            {/* Visualizations */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
+                <h3 className="text-base font-black flex items-center gap-2">
+                  <Database size={18} className="text-indigo-600" />
+                  本地数据多维演化图
+                </h3>
+                <div className="h-[300px] w-full">
+                  {rawData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={rawData}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                        <XAxis dataKey="time" stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
+                        <YAxis stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
+                        <Tooltip contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
+                        <Line type="monotone" dataKey="strength" stroke="#6366F1" strokeWidth={2} dot={false} name="强度" />
+                        <Line type="monotone" dataKey="strain" stroke="#F43F5E" strokeWidth={2} dot={false} name="应变" />
+                        <Line type="monotone" dataKey="strain_rate" stroke="#F59E0B" strokeWidth={2} dot={false} name="速率" />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 text-slate-400">
+                      <Database size={40} className="mb-2 opacity-20" />
+                      <p className="text-xs font-bold uppercase tracking-widest">暂无本地数据</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
+                <h3 className="text-base font-black flex items-center gap-2">
+                  <TrendingUp size={18} className="text-indigo-600" />
+                  寿命预测结果 (含置信区间)
+                </h3>
+                <div className="h-[300px] w-full">
+                  {predictions.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={predictions}>
+                        <defs>
+                          <linearGradient id="colorLife" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#6366F1" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#6366F1" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                        <XAxis dataKey="time" stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
+                        <YAxis stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
+                        <Tooltip contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
+                        <Area type="monotone" dataKey="confidenceUpper" stroke="none" fill="#6366F1" fillOpacity={0.1} />
+                        <Area type="monotone" dataKey="confidenceLower" stroke="none" fill="#6366F1" fillOpacity={0.1} />
+                        <Area type="monotone" dataKey="predictedLife" stroke="#6366F1" strokeWidth={3} fill="url(#colorLife)" name="预测寿命" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 text-slate-400">
+                      <TrendingUp size={40} className="mb-2 opacity-20" />
+                      <p className="text-xs font-bold uppercase tracking-widest">请执行模型训练</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      <footer className="max-w-7xl mx-auto px-4 py-12 border-t border-slate-200 mt-12 text-center">
+        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">
+          © 2026 MaterialLife 智能实验室 · 工业级材料寿命预测平台
+        </p>
+      </footer>
+    </div>
+  );
+}
