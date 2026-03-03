@@ -133,38 +133,54 @@ export default function App() {
   // New data point state
   const [newDataPoint, setNewDataPoint] = useState({ time: 0, strength: 0, strain: 0, strain_rate: 0 });
 
+  // --- Data Service (Mock Backend using localStorage) ---
+  const STORAGE_KEYS = {
+    USERS: 'material_life_users',
+    DATA: 'material_life_data',
+    TRAINED: 'material_life_trained'
+  };
+
+  const initStorage = () => {
+    if (!localStorage.getItem(STORAGE_KEYS.USERS)) {
+      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify([
+        { id: 1, username: 'admin', password: 'admin', role: 'admin' },
+        { id: 2, username: 'user1', password: 'password123', role: 'user' }
+      ]));
+    }
+    if (!localStorage.getItem(STORAGE_KEYS.DATA)) {
+      localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify([]));
+    }
+  };
+
   useEffect(() => {
+    initStorage();
     if (user) {
       fetchData();
       if (user.role === 'admin') fetchAdminUsers();
     }
   }, [user]);
 
-  const fetchData = async () => {
-    const res = await fetch('/api/data');
-    const data = await res.json();
+  const fetchData = () => {
+    const data = JSON.parse(localStorage.getItem(STORAGE_KEYS.DATA) || '[]');
     setRawData(data);
   };
 
-  const fetchAdminUsers = async () => {
-    const res = await fetch('/api/admin/users');
-    const data = await res.json();
-    setAdminUsers(data);
+  const fetchAdminUsers = () => {
+    const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS) || '[]');
+    setAdminUsers(users);
   };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(loginData),
-    });
-    const data = await res.json();
-    if (data.success) {
-      setUser(data.user);
+    
+    const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS) || '[]');
+    const foundUser = users.find((u: any) => u.username === loginData.username && u.password === loginData.password);
+    
+    if (foundUser) {
+      setUser({ id: foundUser.id, username: foundUser.username, role: foundUser.role });
     } else {
-      setLoginError(data.message);
+      setLoginError('用户名或密码错误');
     }
   };
 
@@ -175,16 +191,13 @@ export default function App() {
 
   const handleAddData = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = await fetch('/api/data', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newDataPoint),
-    });
-    if (res.ok) {
-      fetchData();
-      setNotification({ message: '数据添加成功', type: 'success' });
-      setTimeout(() => setNotification(null), 3000);
-    }
+    const data = JSON.parse(localStorage.getItem(STORAGE_KEYS.DATA) || '[]');
+    const newData = [...data, { ...newDataPoint, id: Date.now() }];
+    localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify(newData));
+    
+    fetchData();
+    setNotification({ message: '数据添加成功', type: 'success' });
+    setTimeout(() => setNotification(null), 3000);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -195,23 +208,19 @@ export default function App() {
     reader.onload = async (event) => {
       try {
         const text = event.target?.result as string;
-        // Simple CSV parser
         const lines = text.split('\n').filter(l => l.trim());
-        const data = lines.slice(1).map(line => {
+        const importedData = lines.slice(1).map(line => {
           const [time, strength, strain, strain_rate] = line.split(',').map(Number);
-          return { time, strength, strain, strain_rate };
+          return { time, strength, strain, strain_rate, id: Math.random() };
         });
 
-        const res = await fetch('/api/data', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data),
-        });
-        if (res.ok) {
-          fetchData();
-          setNotification({ message: `成功导入 ${data.length} 条数据`, type: 'success' });
-          setTimeout(() => setNotification(null), 3000);
-        }
+        const data = JSON.parse(localStorage.getItem(STORAGE_KEYS.DATA) || '[]');
+        const newData = [...data, ...importedData];
+        localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify(newData));
+
+        fetchData();
+        setNotification({ message: `成功导入 ${importedData.length} 条数据`, type: 'success' });
+        setTimeout(() => setNotification(null), 3000);
       } catch (err) {
         setNotification({ message: '文件解析失败，请确保格式正确(CSV: time,strength,strain,strain_rate)', type: 'error' });
         setTimeout(() => setNotification(null), 3000);
@@ -243,30 +252,30 @@ export default function App() {
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = await fetch('/api/admin/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newUser),
-    });
-    const data = await res.json();
-    if (data.success) {
+    const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS) || '[]');
+    
+    if (users.some((u: any) => u.username === newUser.username)) {
+      setNotification({ message: '用户名已存在', type: 'error' });
+    } else {
+      const updatedUsers = [...users, { ...newUser, id: Date.now() }];
+      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updatedUsers));
       fetchAdminUsers();
       setNewUser({ username: '', password: '', role: 'user' });
       setNotification({ message: '用户创建成功', type: 'success' });
-    } else {
-      setNotification({ message: data.message, type: 'error' });
     }
     setTimeout(() => setNotification(null), 3000);
   };
 
   const handleDeleteUser = async (id: number) => {
-    await fetch(`/api/admin/users/${id}`, { method: 'DELETE' });
+    const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS) || '[]');
+    const updatedUsers = users.filter((u: any) => u.id !== id || u.role === 'admin');
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updatedUsers));
     fetchAdminUsers();
   };
 
   const handleClearData = async () => {
     if (confirm('确定要清空所有实验数据吗？')) {
-      await fetch('/api/data/clear', { method: 'DELETE' });
+      localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify([]));
       fetchData();
       setPredictions([]);
     }
