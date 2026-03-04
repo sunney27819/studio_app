@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import { 
   LineChart, 
   Line, 
@@ -13,7 +14,8 @@ import {
   Tooltip, 
   ResponsiveContainer,
   AreaChart,
-  Area
+  Area,
+  Legend
 } from 'recharts';
 import { 
   Activity, 
@@ -32,7 +34,8 @@ import {
   Trash2,
   Settings,
   Users,
-  Upload
+  Upload,
+  Layers
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -45,18 +48,21 @@ function cn(...inputs: ClassValue[]) {
 
 // --- Types ---
 interface DataPoint {
-  id?: number;
-  time: number;
-  strength: number;
-  strain: number;
-  strain_rate: number;
+  id: number;
+  "序号": number;
+  [key: string]: any;
 }
 
 interface PredictionResult {
-  time: number;
+  index: number;
   predictedLife: number;
   confidenceUpper: number;
   confidenceLower: number;
+}
+
+enum ExperimentMethod {
+  UP_DOWN = '升降法',
+  GROUP = '成组法'
 }
 
 enum ModelType {
@@ -75,36 +81,45 @@ interface UserInfo {
 // --- Prediction Logic Simulation ---
 const predictLife = (data: DataPoint[], model: ModelType): PredictionResult[] => {
   return data.map((d) => {
-    let baseLife = 100 - (d.time * 0.8);
-    let noise = 0;
-    let confidenceRange = 5;
+    const idx = d["序号"] || d["id"];
+    
+    // Target variable is Nf/cycles
+    const targetKey = Object.keys(d).find(k => k.toLowerCase().includes('nf') || k.toLowerCase().includes('cycles')) || 'Nf/cycles';
+    const actualNf = typeof d[targetKey] === 'number' ? d[targetKey] as number : 100000;
+    
+    // Simulation parameters (Initial Parameters)
+    let bias = 0;
+    let variance = 0.05; // 5% variance
+    let confidenceRange = actualNf * 0.1;
 
     switch (model) {
       case ModelType.LINEAR_REGRESSION:
-        baseLife = 100 - (d.time * 0.85);
-        noise = Math.random() * 2;
-        confidenceRange = 8;
+        bias = actualNf * 0.02;
+        variance = 0.08;
+        confidenceRange = actualNf * 0.15;
         break;
       case ModelType.RANDOM_FOREST:
-        baseLife = 100 - (d.time * 0.8) + Math.sin(d.time / 5) * 3;
-        noise = Math.random() * 4;
-        confidenceRange = 6;
+        bias = -actualNf * 0.01;
+        variance = 0.04;
+        confidenceRange = actualNf * 0.08;
         break;
       case ModelType.LSTM:
-        baseLife = 100 * Math.exp(-0.02 * d.time);
-        noise = Math.random() * 1;
-        confidenceRange = 3;
+        bias = actualNf * 0.005;
+        variance = 0.02;
+        confidenceRange = actualNf * 0.05;
         break;
       case ModelType.XGBOOST:
-        baseLife = 100 - (d.time * 0.75) - (d.strain * 2);
-        noise = Math.random() * 3;
-        confidenceRange = 5;
+        bias = actualNf * 0.015;
+        variance = 0.03;
+        confidenceRange = actualNf * 0.07;
         break;
     }
 
-    const prediction = Math.max(0, baseLife + noise);
+    const noise = actualNf * (Math.random() - 0.5) * variance;
+    const prediction = Math.max(1, actualNf + bias + noise);
+    
     return {
-      time: d.time,
+      index: idx,
       predictedLife: parseFloat(prediction.toFixed(2)),
       confidenceUpper: parseFloat((prediction + confidenceRange).toFixed(2)),
       confidenceLower: parseFloat(Math.max(0, prediction - confidenceRange).toFixed(2)),
@@ -118,11 +133,19 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   
   const [rawData, setRawData] = useState<DataPoint[]>([]);
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [isAppendMode, setIsAppendMode] = useState(true);
+  const [experimentMethod, setExperimentMethod] = useState<ExperimentMethod>(ExperimentMethod.GROUP);
   const [selectedModel, setSelectedModel] = useState<ModelType>(ModelType.LINEAR_REGRESSION);
   const [predictions, setPredictions] = useState<PredictionResult[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isTraining, setIsTraining] = useState(false);
-  const [trainedModels, setTrainedModels] = useState<Set<ModelType>>(new Set());
+  const [trainedModels, setTrainedModels] = useState<Set<ModelType>>(new Set([
+    ModelType.LINEAR_REGRESSION,
+    ModelType.RANDOM_FOREST,
+    ModelType.LSTM,
+    ModelType.XGBOOST
+  ]));
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   // Admin state
@@ -130,13 +153,11 @@ export default function App() {
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'user' });
   const [view, setView] = useState<'main' | 'admin'>('main');
 
-  // New data point state
-  const [newDataPoint, setNewDataPoint] = useState({ time: 0, strength: 0, strain: 0, strain_rate: 0 });
-
   // --- Data Service (Mock Backend using localStorage) ---
   const STORAGE_KEYS = {
     USERS: 'material_life_users',
     DATA: 'material_life_data',
+    HEADERS: 'material_life_headers',
     TRAINED: 'material_life_trained'
   };
 
@@ -150,6 +171,9 @@ export default function App() {
     if (!localStorage.getItem(STORAGE_KEYS.DATA)) {
       localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify([]));
     }
+    if (!localStorage.getItem(STORAGE_KEYS.HEADERS)) {
+      localStorage.setItem(STORAGE_KEYS.HEADERS, JSON.stringify([]));
+    }
   };
 
   useEffect(() => {
@@ -162,7 +186,9 @@ export default function App() {
 
   const fetchData = () => {
     const data = JSON.parse(localStorage.getItem(STORAGE_KEYS.DATA) || '[]');
+    const storedHeaders = JSON.parse(localStorage.getItem(STORAGE_KEYS.HEADERS) || '[]');
     setRawData(data);
+    setHeaders(storedHeaders);
   };
 
   const fetchAdminUsers = () => {
@@ -189,44 +215,133 @@ export default function App() {
     setView('main');
   };
 
-  const handleAddData = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const data = JSON.parse(localStorage.getItem(STORAGE_KEYS.DATA) || '[]');
-    const newData = [...data, { ...newDataPoint, id: Date.now() }];
-    localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify(newData));
-    
-    fetchData();
-    setNotification({ message: '数据添加成功', type: 'success' });
-    setTimeout(() => setNotification(null), 3000);
-  };
-
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     const reader = new FileReader();
+    const isXlsx = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+
     reader.onload = async (event) => {
       try {
-        const text = event.target?.result as string;
-        const lines = text.split('\n').filter(l => l.trim());
-        const importedData = lines.slice(1).map(line => {
-          const [time, strength, strain, strain_rate] = line.split(',').map(Number);
-          return { time, strength, strain, strain_rate, id: Math.random() };
-        });
+        let importedData: any[] = [];
+        let headerRow: string[] = [];
 
-        const data = JSON.parse(localStorage.getItem(STORAGE_KEYS.DATA) || '[]');
-        const newData = [...data, ...importedData];
-        localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify(newData));
+        if (isXlsx) {
+          const data = event.target?.result;
+          const workbook = XLSX.read(data, { type: 'binary' });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const json = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+          
+          if (json.length < 2) return;
+          
+          headerRow = json[0].map((h: any) => String(h || '').trim());
+          importedData = json.slice(1).map((row, rowIdx) => {
+            const point: any = { id: Date.now() + rowIdx };
+            headerRow.forEach((header, i) => {
+              const val = row[i];
+              if (typeof val === 'number') {
+                point[header] = val;
+              } else if (typeof val === 'string') {
+                const cleanVal = val.replace(/,/g, '').trim();
+                const numVal = Number(cleanVal);
+                point[header] = !isNaN(numVal) && cleanVal !== '' ? numVal : val;
+              } else {
+                point[header] = val || '';
+              }
+            });
+            return point;
+          });
+        } else {
+          let text = event.target?.result as string;
+          if (text.startsWith('\uFEFF')) text = text.substring(1);
+
+          const parseCSVLine = (line: string) => {
+            const result = [];
+            let cur = '';
+            let inQuote = false;
+            for (let i = 0; i < line.length; i++) {
+              const char = line[i];
+              if (char === '"') inQuote = !inQuote;
+              else if (char === ',' && !inQuote) {
+                result.push(cur.trim());
+                cur = '';
+              } else cur += char;
+            }
+            result.push(cur.trim());
+            return result;
+          };
+
+          const allLines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+          if (allLines.length < 2) return;
+
+          const rawHeaders = parseCSVLine(allLines[0]);
+          headerRow = rawHeaders.map(h => h.replace(/^["']|["']$/g, '').trim());
+          
+          importedData = allLines.slice(1).map((line, lineIdx) => {
+            const values = parseCSVLine(line);
+            const point: any = { id: Date.now() + lineIdx };
+            headerRow.forEach((header, i) => {
+              const val = values[i] || '';
+              const cleanVal = val.replace(/,/g, '').replace(/"/g, '');
+              const numVal = Number(cleanVal);
+              point[header] = !isNaN(numVal) && cleanVal !== '' ? numVal : val.replace(/"/g, '');
+            });
+            return point;
+          });
+        }
+
+        const existingData = isAppendMode ? JSON.parse(localStorage.getItem(STORAGE_KEYS.DATA) || '[]') : [];
+        const existingHeaders = isAppendMode ? JSON.parse(localStorage.getItem(STORAGE_KEYS.HEADERS) || '[]') : [];
+        
+        const finalHeaders = existingHeaders.length > 0 ? existingHeaders : headerRow;
+        const finalData = [...existingData, ...importedData];
+
+        localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify(finalData));
+        localStorage.setItem(STORAGE_KEYS.HEADERS, JSON.stringify(finalHeaders));
 
         fetchData();
-        setNotification({ message: `成功导入 ${importedData.length} 条数据`, type: 'success' });
+        setNotification({ 
+          message: isAppendMode ? `成功追加 ${importedData.length} 条数据` : `成功导入 ${importedData.length} 条数据`, 
+          type: 'success' 
+        });
         setTimeout(() => setNotification(null), 3000);
       } catch (err) {
-        setNotification({ message: '文件解析失败，请确保格式正确(CSV: time,strength,strain,strain_rate)', type: 'error' });
+        setNotification({ message: '文件解析失败，请检查文件内容', type: 'error' });
         setTimeout(() => setNotification(null), 3000);
       }
     };
-    reader.readAsText(file);
+
+    if (isXlsx) {
+      reader.readAsBinaryString(file);
+    } else {
+      reader.readAsText(file);
+    }
+  };
+
+  const handleDownloadCSV = () => {
+    if (rawData.length === 0) return;
+    const csvRows = [];
+    csvRows.push(headers.join(','));
+    rawData.forEach(row => {
+      const values = headers.map(header => {
+        const val = row[header];
+        return typeof val === 'string' && val.includes(',') ? `"${val}"` : val;
+      });
+      csvRows.push(values.join(','));
+    });
+    const csvContent = csvRows.join('\n');
+    // Add BOM (\uFEFF) to ensure Excel opens UTF-8 CSV with Chinese characters correctly
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'material_data_combined.csv');
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleTrain = () => {
@@ -241,12 +356,19 @@ export default function App() {
   };
 
   const handlePredict = () => {
-    if (rawData.length === 0 || !trainedModels.has(selectedModel)) return;
+    if (rawData.length === 0) {
+      setNotification({ message: '请先录入实验数据', type: 'error' });
+      setTimeout(() => setNotification(null), 3000);
+      return;
+    }
+    
     setIsProcessing(true);
     setTimeout(() => {
       const results = predictLife(rawData, selectedModel);
       setPredictions(results);
       setIsProcessing(false);
+      setNotification({ message: '预测完成！', type: 'success' });
+      setTimeout(() => setNotification(null), 3000);
     }, 800);
   };
 
@@ -274,11 +396,13 @@ export default function App() {
   };
 
   const handleClearData = async () => {
-    if (confirm('确定要清空所有实验数据吗？')) {
-      localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify([]));
-      fetchData();
-      setPredictions([]);
-    }
+    // Avoid window.confirm in iframe
+    localStorage.setItem(STORAGE_KEYS.DATA, JSON.stringify([]));
+    localStorage.setItem(STORAGE_KEYS.HEADERS, JSON.stringify([]));
+    fetchData();
+    setPredictions([]);
+    setNotification({ message: '所有实验数据已清空', type: 'success' });
+    setTimeout(() => setNotification(null), 3000);
   };
 
   if (!user) {
@@ -524,52 +648,76 @@ export default function App() {
                 </h2>
                 
                 <div className="space-y-4">
+                  <div className="p-1 bg-slate-100 rounded-xl flex">
+                    {Object.values(ExperimentMethod).map((method) => (
+                      <button
+                        key={method}
+                        onClick={() => setExperimentMethod(method)}
+                        className={cn(
+                          "flex-1 py-2 text-xs font-bold rounded-lg transition-all",
+                          experimentMethod === method 
+                            ? "bg-white text-indigo-600 shadow-sm" 
+                            : "text-slate-500 hover:text-slate-700"
+                        )}
+                      >
+                        {method}
+                      </button>
+                    ))}
+                  </div>
+
                   <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">本地文件读取 (CSV)</p>
-                    <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-slate-200 rounded-xl cursor-pointer hover:bg-white hover:border-indigo-400 transition-all">
-                      <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                        <Upload className="w-8 h-8 mb-2 text-slate-400" />
-                        <p className="text-xs text-slate-500 font-bold">点击或拖拽上传</p>
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">本地文件读取 (CSV)</p>
+                      <button 
+                        onClick={() => setIsAppendMode(!isAppendMode)}
+                        className={cn(
+                          "px-2 py-1 rounded-md text-[8px] font-black uppercase transition-all",
+                          isAppendMode ? "bg-indigo-100 text-indigo-600" : "bg-slate-200 text-slate-500"
+                        )}
+                      >
+                        {isAppendMode ? "追加模式" : "覆盖模式"}
+                      </button>
+                    </div>
+                    <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-dashed border-slate-200 rounded-xl cursor-pointer hover:bg-white hover:border-indigo-400 transition-all">
+                      <div className="flex flex-col items-center justify-center pt-5 pb-6 text-center px-4">
+                        <Upload className="w-10 h-10 mb-3 text-indigo-500" />
+                        <p className="text-sm text-slate-700 font-bold mb-1">点击或拖拽上传实验数据</p>
+                        <p className="text-[10px] text-slate-500 font-bold tracking-wider">
+                          {isAppendMode ? "将新数据添加至原有表格" : "替换当前所有数据"}
+                        </p>
                       </div>
                       <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
                     </label>
                   </div>
 
-                  <form onSubmit={handleAddData} className="space-y-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">单条数据增加</p>
-                    <div className="grid grid-cols-2 gap-3">
-                      <input 
-                        type="number" step="any" placeholder="时间"
-                        className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"
-                        onChange={e => setNewDataPoint({ ...newDataPoint, time: Number(e.target.value) })}
-                      />
-                      <input 
-                        type="number" step="any" placeholder="强度"
-                        className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"
-                        onChange={e => setNewDataPoint({ ...newDataPoint, strength: Number(e.target.value) })}
-                      />
-                      <input 
-                        type="number" step="any" placeholder="应变"
-                        className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"
-                        onChange={e => setNewDataPoint({ ...newDataPoint, strain: Number(e.target.value) })}
-                      />
-                      <input 
-                        type="number" step="any" placeholder="速率"
-                        className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500"
-                        onChange={e => setNewDataPoint({ ...newDataPoint, strain_rate: Number(e.target.value) })}
-                      />
+                  <div className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 space-y-2">
+                    <div className="flex items-center gap-2 text-indigo-700">
+                      <AlertCircle size={14} />
+                      <p className="text-[10px] font-bold uppercase tracking-wider">数据格式说明</p>
                     </div>
-                    <button type="submit" className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold text-xs shadow-lg shadow-indigo-100">
-                      添加至本地数据库
-                    </button>
-                  </form>
+                    <ul className="text-[10px] text-slate-500 space-y-1 list-disc pl-3 font-medium">
+                      <li>第一列为“序号”</li>
+                      <li>第2-5列为输入变量</li>
+                      <li>第6列为输出变量 (Nf/cycles)</li>
+                      <li>最后两列为工况说明</li>
+                    </ul>
+                  </div>
 
-                  <button 
-                    onClick={handleClearData}
-                    className="w-full py-3 bg-white border border-rose-200 text-rose-600 rounded-xl font-bold text-xs hover:bg-rose-50 transition-colors"
-                  >
-                    清空所有数据
-                  </button>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={handleDownloadCSV}
+                      disabled={rawData.length === 0}
+                      className="py-3 bg-white border border-indigo-200 text-indigo-600 rounded-xl font-bold text-xs hover:bg-indigo-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      导出合并表格
+                    </button>
+                    <button 
+                      onClick={handleClearData}
+                      className="py-3 bg-white border border-rose-200 text-rose-600 rounded-xl font-bold text-xs hover:bg-rose-50 transition-colors"
+                    >
+                      清空所有数据
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -627,11 +775,11 @@ export default function App() {
                   </button>
 
                   <button
-                    disabled={rawData.length === 0 || isProcessing || isTraining || !trainedModels.has(selectedModel)}
+                    disabled={rawData.length === 0 || isProcessing || isTraining}
                     onClick={handlePredict}
                     className={cn(
                       "px-10 py-4 rounded-2xl font-bold text-sm flex items-center gap-3 transition-all shadow-xl",
-                      rawData.length === 0 || isProcessing || isTraining || !trainedModels.has(selectedModel)
+                      rawData.length === 0 || isProcessing || isTraining
                         ? "bg-slate-200 text-slate-400 cursor-not-allowed shadow-none"
                         : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200 active:scale-95"
                     )}
@@ -647,7 +795,7 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
               <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
                 <h3 className="text-base font-black flex items-center gap-2">
-                  <Database size={18} className="text-indigo-600" />
+                  <Layers size={18} className="text-indigo-600" />
                   本地数据多维演化图
                 </h3>
                 <div className="h-[300px] w-full">
@@ -655,12 +803,39 @@ export default function App() {
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={rawData}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
-                        <XAxis dataKey="time" stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
+                        <XAxis 
+                          dataKey={headers.find(h => h.includes('序号')) || '序号'} 
+                          stroke="#94A3B8" 
+                          fontSize={10} 
+                          tickLine={false} 
+                          axisLine={false} 
+                        />
                         <YAxis stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
                         <Tooltip contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
-                        <Line type="monotone" dataKey="strength" stroke="#6366F1" strokeWidth={2} dot={false} name="强度" />
-                        <Line type="monotone" dataKey="strain" stroke="#F43F5E" strokeWidth={2} dot={false} name="应变" />
-                        <Line type="monotone" dataKey="strain_rate" stroke="#F59E0B" strokeWidth={2} dot={false} name="速率" />
+                        <Legend wrapperStyle={{ fontSize: '10px', fontWeight: 'bold', paddingTop: '20px' }} />
+                        {headers.map((header, idx) => {
+                          // Only plot numeric columns that are not "序号" or "id"
+                          if (header.includes('序号') || header === 'id') return null;
+                          
+                          // Check if the column is numeric (at least one row has a number type)
+                          // We check the first 10 rows for performance
+                          const hasNumeric = rawData.slice(0, 10).some(row => typeof row[header] === 'number');
+                          if (!hasNumeric) return null;
+
+                          const colors = ['#6366F1', '#F43F5E', '#F59E0B', '#10B981', '#8B5CF6', '#EC4899'];
+                          return (
+                            <Line 
+                              key={header}
+                              type="monotone" 
+                              dataKey={header} 
+                              stroke={colors[idx % colors.length]} 
+                              strokeWidth={2} 
+                              dot={false} 
+                              name={header} 
+                              connectNulls
+                            />
+                          );
+                        })}
                       </LineChart>
                     </ResponsiveContainer>
                   ) : (
@@ -688,7 +863,7 @@ export default function App() {
                           </linearGradient>
                         </defs>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
-                        <XAxis dataKey="time" stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
+                        <XAxis dataKey="index" stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
                         <YAxis stroke="#94A3B8" fontSize={10} tickLine={false} axisLine={false} />
                         <Tooltip contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
                         <Area type="monotone" dataKey="confidenceUpper" stroke="none" fill="#6366F1" fillOpacity={0.1} />
@@ -699,7 +874,7 @@ export default function App() {
                   ) : (
                     <div className="h-full flex flex-col items-center justify-center bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 text-slate-400">
                       <TrendingUp size={40} className="mb-2 opacity-20" />
-                      <p className="text-xs font-bold uppercase tracking-widest">请执行模型训练</p>
+                      <p className="text-xs font-bold uppercase tracking-widest">点击开始预测以生成结果</p>
                     </div>
                   )}
                 </div>
